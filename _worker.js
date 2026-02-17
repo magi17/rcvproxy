@@ -1,34 +1,41 @@
 export default {
-  async fetch(request, env, ctx) {
-    const urlParam = new URL(request.url).searchParams.get("url");
-    if (!urlParam) {
-      return new Response("Missing url param", { status: 400 });
+  async fetch(request) {
+    const urlObj = new URL(request.url);
+    const target = urlObj.searchParams.get("url");
+
+    if (!target) {
+      return new Response("Missing ?url", { status: 400 });
     }
 
-    const targetUrl = decodeURIComponent(urlParam);
+    const targetUrl = decodeURIComponent(target);
 
-    const modifiedRequest = new Request(targetUrl, {
-      method: request.method,
+    const resp = await fetch(targetUrl, {
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
         "Referer": "https://megacloud.blog/",
-        "Origin": "https://megacloud.blog",
-        "Accept": "*/*"
+        "Origin": "https://megacloud.blog"
       }
     });
 
-    const response = await fetch(modifiedRequest);
+    let contentType = resp.headers.get("content-type") || "";
 
-    const newHeaders = new Headers(response.headers);
-    newHeaders.set("Access-Control-Allow-Origin", "*");
-    newHeaders.set("Access-Control-Allow-Headers", "*");
-    newHeaders.set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
+    if (contentType.includes("text/html")) {
+      let html = await resp.text();
 
-    // Stream response directly (important for .ts)
-    return new Response(response.body, {
-      status: response.status,
-      headers: newHeaders
+      html = html.replace(
+        /(https?:\/\/[^\s"'<>]+)/g,
+        (match) =>
+          `${urlObj.origin}/?url=${encodeURIComponent(match)}`
+      );
+
+      return new Response(html, {
+        headers: { "Content-Type": "text/html" }
+      });
+    }
+
+    return new Response(resp.body, {
+      headers: resp.headers
     });
   }
 };
