@@ -1,0 +1,14 @@
+{
+  "name": "rcvproxy",
+  "version": "1.0.0",
+  "main": "_worker.js",
+  "dependencies": {
+    "hono": "^4.0.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.65.0"
+  },
+  "scripts": {
+    "deploy": "wrangler deploy"
+  }
+}
