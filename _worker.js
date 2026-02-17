@@ -1,105 +1,146 @@
-import { Hono } from 'hono';
-import { cors } from 'hono/cors';
-
-const app = new Hono();
-
-// Enable CORS for all routes
-app.use('*', cors({
-    origin: '*',
-    allowHeaders: '*',
-    allowMethods: ['GET', 'HEAD', 'OPTIONS'],
-    maxAge: 600,
-}));
-
-// Helper to extract base domain from a URL (for Referer)
-function getBaseDomain(urlString) {
-    try {
-        const url = new URL(urlString);
-        return `${url.protocol}//${url.hostname}`;
-    } catch {
-        return '';
-    }
-}
-
-// Proxy all requests
-app.all('*', async (c) => {
-    const targetUrl = c.req.query('url');
+// _worker.js - Enhanced proxy with proper headers and cookie handling
+export default {
+  async fetch(request) {
+    const url = new URL(request.url);
+    const targetUrl = url.searchParams.get('url');
+    
+    // Homepage response
     if (!targetUrl) {
-        return c.text('Missing target URL', 400);
+      return new Response(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <title>Proxy Server</title>
+          <style>
+            body { font-family: Arial; max-width: 800px; margin: 50px auto; padding: 20px; }
+            pre { background: #f4f4f4; padding: 10px; border-radius: 5px; }
+          </style>
+        </head>
+        <body>
+          <h1>🔄 Proxy Worker Active</h1>
+          <p>Usage: <code>${url.origin}/?url=https://example.com</code></p>
+          <h3>Test Links:</h3>
+          <ul>
+            <li><a href="${url.origin}/?url=${encodeURIComponent('https://example.com')}">Example.com</a></li>
+            <li><a href="${url.origin}/?url=${encodeURIComponent('https://httpbin.org/headers')}">httpbin (see headers)</a></li>
+          </ul>
+        </body>
+        </html>
+      `, {
+        headers: { 'Content-Type': 'text/html' }
+      });
     }
 
-    // Decode if it's encoded (the user may or may not encode)
-    let decodedUrl;
     try {
-        decodedUrl = decodeURIComponent(targetUrl);
-    } catch {
-        decodedUrl = targetUrl;
-    }
+      // Decode the target URL
+      const decodedUrl = decodeURIComponent(targetUrl);
+      const target = new URL(decodedUrl);
+      
+      // Get the base domain for referer
+      const baseDomain = `${target.protocol}//${target.hostname}`;
+      
+      // Prepare headers that mimic a real browser
+      const headers = new Headers({
+        // Essential headers
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Referer': baseDomain,
+        'Origin': baseDomain,
+        'Sec-Fetch-Dest': 'iframe',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+        'Sec-Ch-Ua-Mobile': '?0',
+        'Sec-Ch-Ua-Platform': '"Windows"',
+        'Cache-Control': 'max-age=0',
+        'Connection': 'keep-alive'
+      });
 
-    // Build the target URL
-    let url;
-    try {
-        url = new URL(decodedUrl);
-    } catch (e) {
-        return c.text('Invalid target URL', 400);
-    }
+      // Copy over any cookies from the original request
+      const cookie = request.headers.get('Cookie');
+      if (cookie) {
+        headers.set('Cookie', cookie);
+      }
 
-    // Prepare headers for the upstream request
-    const headers = new Headers(c.req.headers);
-    
-    // Important: set Referer and Origin to the target's base domain
-    const baseDomain = getBaseDomain(decodedUrl);
-    headers.set('Referer', baseDomain);
-    headers.set('Origin', baseDomain);
-    
-    // Set a common User-Agent
-    headers.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-    
-    // Remove headers that might cause issues
-    headers.delete('X-Forwarded-For');
-    headers.delete('CF-Connecting-IP');
-    headers.delete('CF-Ray');
-    headers.delete('CF-Visitor');
-    headers.delete('CF-Worker');
-
-    // Build the request to the target
-    const targetRequest = new Request(url, {
-        method: c.req.method,
+      // Forward the request
+      const proxyRequest = new Request(target, {
+        method: request.method,
         headers: headers,
-        body: (c.req.method === 'GET' || c.req.method === 'HEAD') ? null : c.req.body,
-    });
+        body: request.method !== 'GET' && request.method !== 'HEAD' ? request.body : undefined,
+        redirect: 'follow'
+      });
 
-    // Fetch the target
-    let response;
-    try {
-        response = await fetch(targetRequest);
-    } catch (error) {
-        return c.text(`Fetch error: ${error.message}`, 502);
-    }
+      // Fetch with longer timeout
+      const response = await fetch(proxyRequest, {
+        timeout: 30000 // 30 seconds
+      });
 
-    // Build new response headers
-    const newHeaders = new Headers(response.headers);
-    
-    // Override or add CORS headers
-    newHeaders.set('Access-Control-Allow-Origin', '*');
-    newHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    newHeaders.set('Access-Control-Allow-Headers', '*');
-    
-    // Remove headers that prevent embedding
-    newHeaders.delete('X-Frame-Options');
-    newHeaders.delete('Content-Security-Policy');
-    
-    // Ensure Content-Type is preserved (important for video streams)
-    // For video streaming, we need to handle range requests properly.
-    // The fetch API already handles it if the upstream supports range.
-    // Just forward the response as is, but ensure no compression interferes.
-    
-    // Return the response with modified headers
-    return new Response(response.body, {
+      // Create new response with modified headers
+      const responseHeaders = new Headers(response.headers);
+      
+      // Add CORS headers
+      responseHeaders.set('Access-Control-Allow-Origin', '*');
+      responseHeaders.set('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+      responseHeaders.set('Access-Control-Allow-Headers', '*');
+      
+      // Remove blocking headers
+      responseHeaders.delete('X-Frame-Options');
+      responseHeaders.delete('Content-Security-Policy');
+      responseHeaders.delete('Frame-Options');
+      
+      // Handle redirects properly
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get('Location');
+        if (location) {
+          // Make sure redirects go through the proxy too
+          const redirectUrl = new URL(location, target);
+          const proxyRedirect = `${url.origin}/?url=${encodeURIComponent(redirectUrl.toString())}`;
+          responseHeaders.set('Location', proxyRedirect);
+        }
+      }
+
+      // Process HTML content to rewrite URLs
+      if (response.headers.get('Content-Type')?.includes('text/html')) {
+        const text = await response.text();
+        
+        // Rewrite relative URLs to absolute
+        const modified = text
+          .replace(/src="\/(?!\/)/g, `src="${baseDomain}/`)
+          .replace(/href="\/(?!\/)/g, `href="${baseDomain}/`)
+          .replace(/src='\/(?!\/)/g, `src='${baseDomain}/`)
+          .replace(/href='\/(?!\/)/g, `href='${baseDomain}/`)
+          // Also rewrite any URLs that might be absolute but need to go through proxy
+          .replace(/(src|href)="(https?:\/\/[^"]+)"/g, (match, attr, url) => {
+            // Don't proxy data URLs or same-domain URLs
+            if (url.includes(target.hostname) || url.startsWith('data:')) {
+              return match;
+            }
+            // Proxy external resources
+            return `${attr}="${url.origin}/?url=${encodeURIComponent(url)}"`;
+          });
+
+        return new Response(modified, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: responseHeaders
+        });
+      }
+
+      // For non-HTML content (videos, etc), just pass through
+      return new Response(response.body, {
         status: response.status,
         statusText: response.statusText,
-        headers: newHeaders,
-    });
-});
+        headers: responseHeaders
+      });
 
-export default app;
+    } catch (error) {
+      return new Response(`Proxy Error: ${error.message}`, { 
+        status: 500,
+        headers: { 'Content-Type': 'text/plain' }
+      });
+    }
+  }
+};
